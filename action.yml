@@ -1,0 +1,160 @@
+name: 'SEO Review'
+description: >-
+  AI-assisted SEO & meta review for static sites. Scans built HTML with Cheerio,
+  sends a compact report to Claude, posts a sticky PR comment on pull requests
+  and opens a weekly audit issue on scheduled/manual runs.
+author: 'Datum Cloud'
+branding:
+  icon: 'search'
+  color: 'blue'
+
+inputs:
+  anthropic-api-key:
+    description: 'Anthropic API key used to call Claude.'
+    required: true
+  site-url:
+    description: 'Production origin of the site (e.g. https://www.example.com). Used to recognise internal links and render absolute links in the report.'
+    required: true
+  dist-dir:
+    description: 'Directory containing the built HTML output.'
+    required: false
+    default: 'dist'
+  pages-dir:
+    description: 'Source directory whose files map 1:1 to routes (used for changed-file detection and broken-link validation).'
+    required: false
+    default: 'src/pages'
+  content-dir:
+    description: 'Content-collection directory whose files map to routes (used for changed-file detection).'
+    required: false
+    default: 'src/content'
+  scan-mode:
+    description: "'auto' (changed-only on pull_request, full otherwise), 'changed-only', or 'full'."
+    required: false
+    default: 'auto'
+  config-file:
+    description: 'Optional path to a JSON config with excludePaths / excludeFiles / excludeFilePatterns.'
+    required: false
+    default: ''
+  broad-change-pattern:
+    description: 'Optional regex; when a changed file matches it, the PR scan is skipped as a "broad change". Defaults to an Astro-oriented pattern (layouts, components, styles, config).'
+    required: false
+    default: ''
+  model:
+    description: 'Anthropic model id override (defaults to the model pinned in the action).'
+    required: false
+    default: ''
+  max-pages:
+    description: 'Cap on pages analyzed (0 = unlimited).'
+    required: false
+    default: '0'
+  github-token:
+    description: 'Token used to post the PR comment and manage the weekly audit issue.'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install action dependencies
+      shell: bash
+      run: npm ci --prefix "$GITHUB_ACTION_PATH" --no-audit --no-fund
+
+    - name: Collect changed page files (PR only)
+      if: github.event_name == 'pull_request'
+      id: changed
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PAGES_DIR: ${{ inputs.pages-dir }}
+        CONTENT_DIR: ${{ inputs.content-dir }}
+      run: |
+        # The PR merge-ref checkout does not always contain base.sha, so a bare
+        # `git diff "$BASE_SHA"` dies with "fatal: bad object". Fetch both commits
+        # explicitly, then diff with merge-base (three-dot) semantics. No `|| true`:
+        # a broken diff must fail the job, not silently report "no changes".
+        git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA"
+        changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA" -- "$PAGES_DIR/**" "$CONTENT_DIR/**")"
+        {
+          echo 'files<<EOF'
+          printf '%s\n' "$changed"
+          echo 'EOF'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Resolve scan mode
+      id: mode
+      shell: bash
+      env:
+        REQUESTED: ${{ inputs.scan-mode }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: |
+        if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "auto" ]; then
+          echo "value=$REQUESTED" >> "$GITHUB_OUTPUT"
+        elif [ "$EVENT_NAME" = "pull_request" ]; then
+          echo "value=changed-only" >> "$GITHUB_OUTPUT"
+        else
+          echo "value=full" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Fetch previous audit body (for trend arrows)
+      if: github.event_name != 'pull_request'
+      id: prev
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        # Most recent seo-audit issue in any state (closed by next run, but could still be open).
+        prev_body="$(gh issue list --label seo-audit --state all --limit 1 --json body --jq '.[0].body // ""' || echo '')"
+        {
+          echo 'body<<SEOPREV_EOF'
+          printf '%s\n' "$prev_body"
+          echo 'SEOPREV_EOF'
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Run SEO review
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        ANTHROPIC_MODEL: ${{ inputs.model }}
+        SCAN_MODE: ${{ steps.mode.outputs.value }}
+        CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        DIST_DIR: ${{ inputs.dist-dir }}
+        SITE_URL: ${{ inputs.site-url }}
+        PAGES_DIR: ${{ inputs.pages-dir }}
+        CONTENT_DIR: ${{ inputs.content-dir }}
+        SEO_CONFIG: ${{ inputs.config-file }}
+        BROAD_CHANGE_PATTERN: ${{ inputs.broad-change-pattern }}
+        MAX_PAGES: ${{ inputs.max-pages }}
+        OUTPUT_FILE: .tmp/seo-review.md
+        PREVIOUS_AUDIT_BODY: ${{ steps.prev.outputs.body }}
+      run: node "$GITHUB_ACTION_PATH/seo-review.mjs"
+
+    - name: Post or update PR comment
+      if: github.event_name == 'pull_request'
+      uses: marocchino/sticky-pull-request-comment@v3
+      with:
+        header: seo-review-bot
+        path: .tmp/seo-review.md
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    - name: Open audit issue
+      if: github.event_name != 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        DATE="$(date -u +%Y-%m-%d)"
+        TITLE="SEO Audit — ${DATE}"
+        BODY_FILE=".tmp/seo-review.md"
+        # Ensure label exists (idempotent).
+        gh label create seo-audit --color BFD4F2 --description "Weekly SEO audit reports" 2>/dev/null || true
+        # Close any older open audit issues to keep the list tidy.
+        gh issue list --label seo-audit --state open --json number,title \
+          --jq '.[] | select(.title != "'"$TITLE"'") | .number' \
+          | xargs -I{} gh issue close {} --comment "Superseded by ${TITLE}." || true
+        gh issue create \
+          --title "$TITLE" \
+          --label seo-audit \
+          --body-file "$BODY_FILE"
