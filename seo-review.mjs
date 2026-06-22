@@ -1,18 +1,25 @@
 #!/usr/bin/env node
 /**
  * Extracts SEO/meta data from built HTML files using Cheerio,
- * sends a compact report to Claude for review, and writes a
+ * sends a compact report to an AI model for review, and writes a
  * markdown comment to stdout (or to $GITHUB_OUTPUT comment file).
  *
  * Env:
- *   ANTHROPIC_API_KEY   required to call Claude
+ *   AI_PROVIDER         'anthropic' (default) | 'openai' | 'gemini'
+ *   AI_API_KEY          required: API key for the selected provider
+ *                       (ANTHROPIC_API_KEY is accepted as a legacy fallback)
+ *   AI_MODEL            optional model id override (ANTHROPIC_MODEL is a
+ *                       legacy fallback when AI_PROVIDER=anthropic)
+ *   AI_BASE_URL         optional API base URL override (e.g. an
+ *                       OpenAI-compatible gateway like OpenRouter or Groq
+ *                       with AI_PROVIDER=openai)
  *   SCAN_MODE           'changed-only' (default, PR runs) | 'full' (weekly scheduled run;
  *                       adds broken-link + redirect-chain audits over all built pages)
  *   CHANGED_FILES       newline list of changed src/pages|src/content files (changed-only mode)
  *   DIST_DIR            default: dist/client
  *   MAX_PAGES           default: unlimited (set to a positive integer to cap; 0/unset = no cap).
  *                       Note: AI review payload is still capped by MAX_INPUT_CHARS — extra
- *                       pages may be dropped from the Claude prompt but always count in the
+ *                       pages may be dropped from the AI prompt but always count in the
  *                       deterministic score table and broken-link audit.
  *   OUTPUT_FILE         default: .tmp/seo-review.md
  *   SITE_URL            required: production origin used to recognise internal links
@@ -34,8 +41,7 @@ const DIST_DIR = process.env.DIST_DIR || 'dist/client';
 const MAX_PAGES_RAW = parseInt(process.env.MAX_PAGES || '0', 10);
 const MAX_PAGES = Number.isFinite(MAX_PAGES_RAW) && MAX_PAGES_RAW > 0 ? MAX_PAGES_RAW : Infinity;
 const OUTPUT_FILE = process.env.OUTPUT_FILE || '.tmp/seo-review.md';
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6'; // or 'claude-2' for faster, cheaper reviews with less insight
-// Claude input limit is 200K tokens (~800K chars at 4 chars/token).
+// Model input limits are ~200K tokens (~800K chars at 4 chars/token) on current models.
 // Cap user content at ~160K tokens worth of chars to leave headroom for system + output.
 const MAX_INPUT_CHARS = parseInt(process.env.MAX_INPUT_CHARS || '640000', 10);
 // Single switch driving page-selection behaviour.
@@ -489,59 +495,172 @@ function chunkPagesByCharBudget(pages, budget) {
   return batches;
 }
 
-// Aggregates token usage across all Claude calls within a single run.
-const tokenTotals = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, calls: 0 };
+// ---------------------------------------------------------------------------
+// AI provider layer — each provider maps the same {system, userContent}
+// request onto its native HTTP API and returns {text, usage, truncated}.
+// ---------------------------------------------------------------------------
 
-async function postClaude({ system, userContent }) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+const MAX_OUTPUT_TOKENS = 8192;
+
+async function postJson(url, headers, body) {
+  const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 8192,
-      system,
-      messages: [{ role: 'user', content: userContent }],
-    }),
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`Claude API ${res.status}: ${txt}`);
+    throw new Error(`${PROVIDER} API ${res.status}: ${txt}`);
   }
-  const data = await res.json();
-  const u = data.usage || {};
-  const inTok = u.input_tokens || 0;
-  const outTok = u.output_tokens || 0;
-  const cacheR = u.cache_read_input_tokens || 0;
-  const cacheC = u.cache_creation_input_tokens || 0;
-  tokenTotals.input += inTok;
-  tokenTotals.output += outTok;
-  tokenTotals.cacheRead += cacheR;
-  tokenTotals.cacheCreate += cacheC;
+  return res.json();
+}
+
+const PROVIDERS = {
+  anthropic: {
+    defaultModel: 'claude-sonnet-4-6',
+    defaultBaseUrl: 'https://api.anthropic.com',
+    async post({ system, userContent }) {
+      const data = await postJson(
+        `${BASE_URL}/v1/messages`,
+        { 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+        {
+          model: MODEL,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          system,
+          messages: [{ role: 'user', content: userContent }],
+        }
+      );
+      const u = data.usage || {};
+      return {
+        text: data.content?.map((b) => b.text).join('\n') || '',
+        usage: {
+          input: u.input_tokens || 0,
+          output: u.output_tokens || 0,
+          cacheRead: u.cache_read_input_tokens || 0,
+          cacheCreate: u.cache_creation_input_tokens || 0,
+        },
+        truncated: data.stop_reason === 'max_tokens',
+      };
+    },
+  },
+  openai: {
+    defaultModel: 'gpt-5-mini',
+    defaultBaseUrl: 'https://api.openai.com',
+    async post({ system, userContent }) {
+      const data = await postJson(
+        `${BASE_URL}/v1/chat/completions`,
+        { authorization: `Bearer ${API_KEY}` },
+        {
+          model: MODEL,
+          max_completion_tokens: MAX_OUTPUT_TOKENS,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: userContent },
+          ],
+        }
+      );
+      const u = data.usage || {};
+      const choice = data.choices?.[0];
+      // OpenAI's prompt_tokens INCLUDES cached tokens; split them out so the
+      // run summary doesn't double-count.
+      const cached = u.prompt_tokens_details?.cached_tokens || 0;
+      return {
+        text: choice?.message?.content || '',
+        usage: {
+          input: (u.prompt_tokens || 0) - cached,
+          output: u.completion_tokens || 0,
+          cacheRead: cached,
+          cacheCreate: 0,
+        },
+        truncated: choice?.finish_reason === 'length',
+      };
+    },
+  },
+  gemini: {
+    defaultModel: 'gemini-2.5-flash',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
+    async post({ system, userContent }) {
+      const data = await postJson(
+        `${BASE_URL}/v1beta/models/${MODEL}:generateContent`,
+        { 'x-goog-api-key': API_KEY },
+        {
+          systemInstruction: { parts: [{ text: system }] },
+          contents: [{ role: 'user', parts: [{ text: userContent }] }],
+          generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS },
+        }
+      );
+      const u = data.usageMetadata || {};
+      const cand = data.candidates?.[0];
+      // Gemini's promptTokenCount INCLUDES cached tokens; split them out so
+      // the run summary doesn't double-count.
+      const cached = u.cachedContentTokenCount || 0;
+      return {
+        text: cand?.content?.parts?.map((p) => p.text).join('\n') || '',
+        usage: {
+          input: (u.promptTokenCount || 0) - cached,
+          output: u.candidatesTokenCount || 0,
+          cacheRead: cached,
+          cacheCreate: 0,
+        },
+        truncated: cand?.finishReason === 'MAX_TOKENS',
+      };
+    },
+  },
+};
+
+const PROVIDER = (process.env.AI_PROVIDER || 'anthropic').toLowerCase();
+if (!PROVIDERS[PROVIDER]) {
+  console.error(
+    `Unknown AI_PROVIDER: ${PROVIDER}. Supported: ${Object.keys(PROVIDERS).join(', ')}.`
+  );
+  process.exit(1);
+}
+// ANTHROPIC_API_KEY / ANTHROPIC_MODEL kept as legacy fallbacks for pre-multi-provider callers.
+const API_KEY = process.env.AI_API_KEY || process.env.ANTHROPIC_API_KEY;
+if (!API_KEY) {
+  console.error('AI_API_KEY is required (or ANTHROPIC_API_KEY for the anthropic provider).');
+  process.exit(1);
+}
+const MODEL =
+  process.env.AI_MODEL ||
+  (PROVIDER === 'anthropic' && process.env.ANTHROPIC_MODEL) ||
+  PROVIDERS[PROVIDER].defaultModel;
+const BASE_URL = (process.env.AI_BASE_URL || PROVIDERS[PROVIDER].defaultBaseUrl).replace(
+  /\/+$/,
+  ''
+);
+
+// Aggregates token usage across all AI calls within a single run.
+const tokenTotals = { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, calls: 0 };
+
+async function postAI({ system, userContent }) {
+  const { text, usage, truncated } = await PROVIDERS[PROVIDER].post({ system, userContent });
+  tokenTotals.input += usage.input;
+  tokenTotals.output += usage.output;
+  tokenTotals.cacheRead += usage.cacheRead;
+  tokenTotals.cacheCreate += usage.cacheCreate;
   tokenTotals.calls += 1;
   console.log(
-    `Tokens — call #${tokenTotals.calls}: in=${inTok} out=${outTok}` +
-      (cacheR || cacheC ? ` (cache read=${cacheR} create=${cacheC})` : '')
+    `Tokens — call #${tokenTotals.calls}: in=${usage.input} out=${usage.output}` +
+      (usage.cacheRead || usage.cacheCreate
+        ? ` (cache read=${usage.cacheRead} create=${usage.cacheCreate})`
+        : '')
   );
-  let text = data.content?.map((b) => b.text).join('\n') || '_No content returned._';
-  // Fail loud on truncation: when the model hits max_tokens the response is cut
-  // off mid-section (the last "Per-page Notes" section is the first casualty),
-  // and the script would otherwise write the partial text as if complete.
-  if (data.stop_reason === 'max_tokens') {
+  let out = text || '_No content returned._';
+  // Fail loud on truncation: when the model hits its output-token limit the
+  // response is cut off mid-section (the last "Per-page Notes" section is the
+  // first casualty), and the script would otherwise write the partial text as
+  // if complete.
+  if (truncated) {
     console.warn(
-      `WARNING: call #${tokenTotals.calls} hit max_tokens (${outTok} tokens) — output is TRUNCATED.`
+      `WARNING: call #${tokenTotals.calls} hit the output-token limit (${usage.output} tokens) — output is TRUNCATED.`
     );
-    text +=
+    out +=
       '\n\n> ⚠️ **Report truncated** — the model hit its output-token limit before finishing. ' +
       'Sections after this point (e.g. Per-page Notes) are missing. ' +
-      'Raise `max_tokens` in the action\'s `seo-review.mjs` or reduce the page set.';
+      "Raise `MAX_OUTPUT_TOKENS` in the action's `seo-review.mjs` or reduce the page set.";
   }
-  return text;
+  return out;
 }
 
 function buildFullSystemPrompt(extras) {
@@ -582,7 +701,7 @@ When a shared root cause affects many pages, propose the single template-level f
 Be terse and actionable. Don't restate compliant pages. Don't invent metrics or speculate beyond the data.`;
 }
 
-async function callClaudeSingle(pages, extras, totalPages) {
+async function callAISingle(pages, extras, totalPages) {
   const payload = { pages };
   if (extras.brokenLinks) payload.brokenLinks = extras.brokenLinks;
   if (extras.redirectChains) payload.redirectChains = extras.redirectChains;
@@ -590,10 +709,10 @@ async function callClaudeSingle(pages, extras, totalPages) {
   console.log(
     `Single-call: ${userContent.length} chars (~${Math.round(userContent.length / 4)} tokens).`
   );
-  return postClaude({ system: buildFullSystemPrompt(extras), userContent });
+  return postAI({ system: buildFullSystemPrompt(extras), userContent });
 }
 
-async function callClaudeBatch(pages, batchIndex, batchCount, totalPages) {
+async function callAIBatch(pages, batchIndex, batchCount, totalPages) {
   const system = `You are an SEO reviewer auditing batch ${batchIndex} of ${batchCount} for a static site.
 You will receive a JSON array of pages with extracted SEO signals.
 
@@ -607,10 +726,10 @@ Skip pages with no issues. Be terse. Don't invent metrics. Don't restate complia
   console.log(
     `Batch ${batchIndex}/${batchCount}: ${pages.length} pages, ${userContent.length} chars (~${Math.round(userContent.length / 4)} tokens).`
   );
-  return postClaude({ system, userContent });
+  return postAI({ system, userContent });
 }
 
-async function callClaudeSynthesis(batchNotes, extras, totalPages) {
+async function callAISynthesis(batchNotes, extras, totalPages) {
   const system = `You are an SEO reviewer synthesizing a final report for a static site.
 You will receive per-page issue bullets (each with a Fix line) collected from multiple batches, plus optional global audit data.
 
@@ -650,18 +769,18 @@ Be terse and actionable. Don't invent metrics. Preserve fix suggestions from the
   console.log(
     `Synthesis: ${userContent.length} chars (~${Math.round(userContent.length / 4)} tokens).`
   );
-  return postClaude({ system, userContent });
+  return postAI({ system, userContent });
 }
 
-async function callClaude(report, extras = {}) {
+async function callAI(report, extras = {}) {
   const batches = chunkPagesByCharBudget(report, MAX_INPUT_CHARS);
   if (batches.length <= 1) {
-    return callClaudeSingle(report, extras, report.length);
+    return callAISingle(report, extras, report.length);
   }
   console.log(`Splitting ${report.length} pages into ${batches.length} batches.`);
   const batchNotes = [];
   for (let i = 0; i < batches.length; i++) {
-    const notes = await callClaudeBatch(batches[i], i + 1, batches.length, report.length);
+    const notes = await callAIBatch(batches[i], i + 1, batches.length, report.length);
     batchNotes.push(notes);
   }
   // If synthesis would itself exceed the cap, fall back to deterministic concat.
@@ -674,7 +793,7 @@ async function callClaude(report, extras = {}) {
       .map((notes, i) => `### Batch ${i + 1}/${batches.length}\n\n${notes.trim()}`)
       .join('\n\n');
   }
-  return callClaudeSynthesis(batchNotes, extras, report.length);
+  return callAISynthesis(batchNotes, extras, report.length);
 }
 
 async function main() {
@@ -779,7 +898,7 @@ async function main() {
       );
     }
 
-    const review = await callClaude(report, {
+    const review = await callAI(report, {
       brokenLinks: brokenLinks?.length ? brokenLinks : undefined,
       redirectChains: redirectChains?.length ? redirectChains : undefined,
     });

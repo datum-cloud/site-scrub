@@ -1,17 +1,30 @@
-name: 'SEO Review'
+name: 'Site Scrub'
 description: >-
   AI-assisted SEO & meta review for static sites. Scans built HTML with Cheerio,
-  sends a compact report to Claude, posts a sticky PR comment on pull requests
-  and opens a weekly audit issue on scheduled/manual runs.
+  sends a compact report to an AI model (Claude, GPT, or Gemini), posts a sticky
+  PR comment on pull requests and opens a weekly audit issue on scheduled/manual runs.
 author: 'Datum Cloud'
 branding:
   icon: 'search'
   color: 'blue'
 
 inputs:
+  provider:
+    description: "AI provider: 'anthropic' (default), 'openai', or 'gemini'."
+    required: false
+    default: 'anthropic'
+  api-key:
+    description: 'API key for the selected provider.'
+    required: false
+    default: ''
   anthropic-api-key:
-    description: 'Anthropic API key used to call Claude.'
-    required: true
+    description: 'Deprecated — use `api-key` (kept for backward compatibility with provider: anthropic).'
+    required: false
+    default: ''
+  base-url:
+    description: 'Optional API base URL override (e.g. an OpenAI-compatible gateway like OpenRouter or Groq together with provider: openai).'
+    required: false
+    default: ''
   site-url:
     description: 'Production origin of the site (e.g. https://www.example.com). Used to recognise internal links and render absolute links in the report.'
     required: true
@@ -40,7 +53,7 @@ inputs:
     required: false
     default: ''
   model:
-    description: 'Anthropic model id override (defaults to the model pinned in the action).'
+    description: 'Model id override (defaults to the model pinned in the action for the selected provider).'
     required: false
     default: ''
   max-pages:
@@ -115,8 +128,11 @@ runs:
     - name: Run SEO review
       shell: bash
       env:
+        AI_PROVIDER: ${{ inputs.provider }}
+        AI_API_KEY: ${{ inputs.api-key }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
-        ANTHROPIC_MODEL: ${{ inputs.model }}
+        AI_MODEL: ${{ inputs.model }}
+        AI_BASE_URL: ${{ inputs.base-url }}
         SCAN_MODE: ${{ steps.mode.outputs.value }}
         CHANGED_FILES: ${{ steps.changed.outputs.files }}
         DIST_DIR: ${{ inputs.dist-dir }}

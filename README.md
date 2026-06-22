@@ -1,8 +1,8 @@
-# SEO Review Action
+# Site Scrub
 
 AI-assisted SEO & meta review for static sites, packaged as a GitHub composite action.
 
-It scans your **built HTML output** with Cheerio (titles, descriptions, canonicals, H1s, robots, Open Graph/Twitter tags, JSON-LD, image alt text), computes a deterministic score table, and sends a compact report to Claude for an actionable review. Then it:
+It scans your **built HTML output** with Cheerio (titles, descriptions, canonicals, H1s, robots, Open Graph/Twitter tags, JSON-LD, image alt text), computes a deterministic score table, and sends a compact report to an AI model (Claude, GPT, or Gemini) for an actionable review. Then it:
 
 - **On `pull_request`** — reviews only the pages affected by the PR and posts a sticky comment.
 - **On `schedule` / `workflow_dispatch`** — runs a full-site audit (including broken internal links and redirect-chain checks), opens a labelled issue, and shows trend arrows vs. the previous audit.
@@ -11,7 +11,7 @@ It scans your **built HTML output** with Cheerio (titles, descriptions, canonica
 
 - The job must run `actions/checkout` and **build the site** before calling this action (it audits files on disk, not a live URL — SSR-only sites without prerendered HTML are not supported).
 - Node.js available on the runner (`actions/setup-node` or the runner default).
-- An `ANTHROPIC_API_KEY` secret.
+- An API key secret for one of the supported AI providers (Anthropic, OpenAI, or Google Gemini).
 - Permissions: `contents: read`, `pull-requests: write`, `issues: write`.
 
 ## Usage
@@ -60,19 +60,49 @@ jobs:
         run: npm run build
 
       - name: SEO review
-        uses: datum-cloud/seo-review-action@v1
+        uses: datum-cloud/site-scrub@v1
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           site-url: https://www.example.com
           dist-dir: dist
           scan-mode: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'auto' }}
 ```
 
+## AI providers
+
+The action defaults to Anthropic (Claude). Switch providers with `provider` + `api-key`:
+
+```yaml
+# OpenAI
+with:
+  provider: openai
+  api-key: ${{ secrets.OPENAI_API_KEY }}
+
+# Google Gemini
+with:
+  provider: gemini
+  api-key: ${{ secrets.GEMINI_API_KEY }}
+
+# Any OpenAI-compatible gateway (OpenRouter, Groq, …)
+with:
+  provider: openai
+  api-key: ${{ secrets.OPENROUTER_API_KEY }}
+  base-url: https://openrouter.ai/api
+  model: anthropic/claude-sonnet-4.6
+```
+
+Default models per provider: `claude-sonnet-4-6` (anthropic), `gpt-5-mini` (openai), `gemini-2.5-flash` (gemini). Override with `model`.
+
+The legacy `anthropic-api-key` input still works and implies `provider: anthropic`.
+
 ## Inputs
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `anthropic-api-key` | ✅ | — | Anthropic API key. |
+| `api-key` | ✅ | — | API key for the selected provider. |
+| `provider` | | `anthropic` | AI provider: `anthropic`, `openai`, or `gemini`. |
+| `base-url` | | per provider | API base URL override (e.g. an OpenAI-compatible gateway with `provider: openai`). |
+| `anthropic-api-key` | | — | Deprecated alias of `api-key` (Anthropic only). |
 | `site-url` | ✅ | — | Production origin (e.g. `https://www.example.com`). Used to recognise internal links and render absolute links in the report. |
 | `dist-dir` | | `dist` | Directory containing built HTML (Astro: `dist/client` when using an adapter). |
 | `pages-dir` | | `src/pages` | Source dir whose files map to routes; used for changed-file detection and broken-link validation. |
@@ -80,7 +110,7 @@ jobs:
 | `scan-mode` | | `auto` | `auto` (changed-only on PRs, full otherwise), `changed-only`, or `full`. |
 | `config-file` | | — | Path to a JSON config with `excludePaths`, `excludeFiles`, `excludeFilePatterns` (regex strings). |
 | `broad-change-pattern` | | Astro-oriented | Regex; a changed file matching it makes the PR scan skip as a "broad change" (layout/config edits would invalidate a per-page diff). |
-| `model` | | pinned in action | Anthropic model id override. |
+| `model` | | pinned in action | Model id override for the selected provider. |
 | `max-pages` | | `0` (unlimited) | Cap on pages analyzed. |
 | `github-token` | | `github.token` | Token for the PR comment and audit issue. |
 
