@@ -1,0 +1,57 @@
+seo-review.mjs
+  s_b586fa5d0cf24e::t_dda859a5d2ab44 772,775,778,783
+  s_b586fa5d0cf24e::t_4e7d2b20a7e1c3 4,8-15
+  s_b586fa5d0cf24e::t_48638acc096224 729,732
+  s_b586fa5d0cf24e::t_aa1afc4f4766e7 796
+  s_b586fa5d0cf24e::t_fafe01b37cd574 704
+  s_b586fa5d0cf24e::t_5e475c99b7224a 498-503,505-506,508-509,513,515-641,644-647,649-654,656,658,661,663
+  s_b586fa5d0cf24e::t_29a7da48f21a5a 22
+  s_b586fa5d0cf24e::t_269e64524cf59f 901
+  s_b586fa5d0cf24e::t_954f13e274832a 712,715
+  s_b586fa5d0cf24e::t_da4e209162b903 44
+action.yml
+  s_b586fa5d0cf24e::t_9c2b91ca15926a 12-19,21-27
+  s_b586fa5d0cf24e::t_ba2416b4687a80 131-132,134-135
+  s_c142d58a9fae16::t_95cf220ff0e964 1
+  s_b586fa5d0cf24e::t_0b10269e8921f4 4-5
+  s_b586fa5d0cf24e::t_13da540dcbb0a1 56
+package.json
+  h_c7951bc64db670 2
+README.md
+  s_b586fa5d0cf24e::t_cc8db9f3d41a7e 65,71-96
+  s_b586fa5d0cf24e::t_66d19f163762c5 102-105
+  s_b586fa5d0cf24e::t_b7b424c7874fe4 113
+  s_b586fa5d0cf24e::t_63ec030c33cbd2 14
+  h_c7951bc64db670 63
+  s_c142d58a9fae16::t_a0463436095bb1 1
+  s_b586fa5d0cf24e::t_fbe53c7a2bcf81 5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.9",
+  "base_commit_sha": "10d3b72250acdaf80aca354bb3b972e99adc0f13",
+  "prompts": {},
+  "humans": {
+    "h_c7951bc64db670": {
+      "author": "AriaEdo <aria.edo@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_b586fa5d0cf24e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "93e686f0-3d0b-4bbc-9184-dda848b97e1a",
+        "model": "claude-fable-5"
+      },
+      "human_author": "AriaEdo <aria.edo@gmail.com>"
+    },
+    "s_c142d58a9fae16": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2180a057-c0a7-4128-ae1e-df9f29be3272",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "AriaEdo <aria.edo@gmail.com>"
+    }
+  }
+}
