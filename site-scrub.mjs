@@ -21,7 +21,7 @@
  *                       Note: AI review payload is still capped by MAX_INPUT_CHARS — extra
  *                       pages may be dropped from the AI prompt but always count in the
  *                       deterministic score table and broken-link audit.
- *   OUTPUT_FILE         default: .tmp/seo-review.md
+ *   OUTPUT_FILE         default: .tmp/site-scrub.md
  *   SITE_URL            required: production origin used to recognise internal links
  *                       and to render absolute links in the report
  *   PAGES_DIR           default: src/pages (source dir mapped to routes)
@@ -36,11 +36,15 @@ import { readFile, writeFile, readdir, stat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { load } from 'cheerio';
 
-const DIST_DIR = process.env.DIST_DIR || 'dist/client';
+const DIST_DIR = process.env.DIST_DIR || 'dist';
+if (!DIST_DIR.trim()) {
+  console.error('DIST_DIR / dist-dir cannot be empty.');
+  process.exit(1);
+}
 // 0 / unset / non-positive = unlimited. Cap exists only as an escape hatch.
 const MAX_PAGES_RAW = parseInt(process.env.MAX_PAGES || '0', 10);
 const MAX_PAGES = Number.isFinite(MAX_PAGES_RAW) && MAX_PAGES_RAW > 0 ? MAX_PAGES_RAW : Infinity;
-const OUTPUT_FILE = process.env.OUTPUT_FILE || '.tmp/seo-review.md';
+const OUTPUT_FILE = process.env.OUTPUT_FILE || '.tmp/site-scrub.md';
 // Model input limits are ~200K tokens (~800K chars at 4 chars/token) on current models.
 // Cap user content at ~160K tokens worth of chars to leave headroom for system + output.
 const MAX_INPUT_CHARS = parseInt(process.env.MAX_INPUT_CHARS || '640000', 10);
@@ -51,6 +55,9 @@ const MAX_INPUT_CHARS = parseInt(process.env.MAX_INPUT_CHARS || '640000', 10);
 //   full: scan every built page AND run broken-link + redirect-chain audits.
 //     Intended for the weekly schedule.
 const RAW_SCAN_MODE = (process.env.SCAN_MODE || 'changed-only').toLowerCase();
+if (RAW_SCAN_MODE !== 'full' && RAW_SCAN_MODE !== 'changed-only') {
+  console.warn(`Unknown SCAN_MODE "${process.env.SCAN_MODE}", defaulting to "changed-only".`);
+}
 const SCAN_MODE = RAW_SCAN_MODE === 'full' ? 'full' : 'changed-only';
 const SITE_URL = process.env.SITE_URL;
 if (!SITE_URL) {
@@ -68,7 +75,7 @@ const PAGES_DIR = (process.env.PAGES_DIR || 'src/pages').replace(/\/+$/, '');
 const CONTENT_DIR = (process.env.CONTENT_DIR || 'src/content').replace(/\/+$/, '');
 const CONFIG_FILE =
   process.env.SEO_CONFIG ||
-  path.join(path.dirname(new URL(import.meta.url).pathname), '/seo-review.config.json');
+  path.join(path.dirname(new URL(import.meta.url).pathname), '/site-scrub.config.json');
 
 async function loadConfig() {
   try {
@@ -77,7 +84,13 @@ async function loadConfig() {
     return {
       excludePaths: cfg.excludePaths || [],
       excludeFiles: new Set(cfg.excludeFiles || []),
-      excludeFilePatterns: (cfg.excludeFilePatterns || []).map((p) => new RegExp(p, 'i')),
+      excludeFilePatterns: (cfg.excludeFilePatterns || []).map((p) => {
+        try {
+          return new RegExp(p, 'i');
+        } catch (err) {
+          throw new Error(`Invalid excludeFilePatterns entry "${p}": ${err.message}`);
+        }
+      }),
     };
   } catch (err) {
     if (err.code !== 'ENOENT') throw err;
@@ -443,9 +456,15 @@ function toUrlPath(file, root) {
   return '/' + rel;
 }
 
-const BROAD_CHANGE_RE = process.env.BROAD_CHANGE_PATTERN
-  ? new RegExp(process.env.BROAD_CHANGE_PATTERN)
-  : /^(src\/(layouts|components|styles|middleware)\/|astro\.config|tailwind\.config|src\/consts|package\.json|package-lock\.json)/;
+let BROAD_CHANGE_RE;
+try {
+  BROAD_CHANGE_RE = process.env.BROAD_CHANGE_PATTERN
+    ? new RegExp(process.env.BROAD_CHANGE_PATTERN)
+    : /^(src\/(layouts|components|styles|middleware)\/|astro\.config|tailwind\.config|src\/consts|package\.json|package-lock\.json)/;
+} catch (err) {
+  console.error(`Invalid BROAD_CHANGE_PATTERN regex: ${err.message}`);
+  process.exit(1);
+}
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const PAGES_FILE_RE = new RegExp(`^${escapeRe(PAGES_DIR)}/(.+?)\\.(astro|md|mdx|html)$`);
@@ -503,16 +522,29 @@ function chunkPagesByCharBudget(pages, budget) {
 const MAX_OUTPUT_TOKENS = 8192;
 
 async function postJson(url, headers, body) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
+  const MAX_RETRIES = 3;
+  let lastError;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delay = Math.min(1000 * 2 ** (attempt - 1), 30_000);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(300_000),
+    });
+    if (res.ok) return res.json();
     const txt = await res.text();
-    throw new Error(`${PROVIDER} API ${res.status}: ${txt}`);
+    const msg = `${PROVIDER} API ${res.status}: ${txt.slice(0, 200)}`;
+    if ((res.status === 429 || res.status >= 500) && attempt < MAX_RETRIES - 1) {
+      lastError = new Error(msg);
+      continue;
+    }
+    throw new Error(msg);
   }
-  return res.json();
+  throw lastError;
 }
 
 const PROVIDERS = {
@@ -658,7 +690,7 @@ async function postAI({ system, userContent }) {
     out +=
       '\n\n> ⚠️ **Report truncated** — the model hit its output-token limit before finishing. ' +
       'Sections after this point (e.g. Per-page Notes) are missing. ' +
-      "Raise `MAX_OUTPUT_TOKENS` in the action's `seo-review.mjs` or reduce the page set.";
+      "Raise `MAX_OUTPUT_TOKENS` in the action's `site-scrub.mjs` or reduce the page set.";
   }
   return out;
 }
@@ -853,7 +885,7 @@ async function main() {
   let body;
   if (picked.length === 0) {
     body = [
-      '<!-- seo-review-bot -->',
+      '<!-- site-scrub-bot -->',
       heading,
       '',
       `_Skipped (mode: \`${mode}\`)._`,
@@ -916,7 +948,7 @@ async function main() {
     } = computeScoreSummary(report, brokenLinks, redirectChains, previousScores);
 
     body = [
-      '<!-- seo-review-bot -->',
+      '<!-- sesite-scrub-bot -->',
       scoreMachine,
       heading,
       '',

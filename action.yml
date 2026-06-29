@@ -82,6 +82,7 @@ runs:
         PAGES_DIR: ${{ inputs.pages-dir }}
         CONTENT_DIR: ${{ inputs.content-dir }}
       run: |
+        set -euo pipefail
         # The PR merge-ref checkout does not always contain base.sha, so a bare
         # `git diff "$BASE_SHA"` dies with "fatal: bad object". Fetch both commits
         # explicitly, then diff with merge-base (three-dot) semantics. No `|| true`:
@@ -101,13 +102,26 @@ runs:
         REQUESTED: ${{ inputs.scan-mode }}
         EVENT_NAME: ${{ github.event_name }}
       run: |
-        if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "auto" ]; then
-          echo "value=$REQUESTED" >> "$GITHUB_OUTPUT"
-        elif [ "$EVENT_NAME" = "pull_request" ]; then
-          echo "value=changed-only" >> "$GITHUB_OUTPUT"
-        else
-          echo "value=full" >> "$GITHUB_OUTPUT"
-        fi
+        case "$REQUESTED" in
+          changed-only|full)
+            echo "value=$REQUESTED" >> "$GITHUB_OUTPUT"
+            ;;
+          auto|"")
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              echo "value=changed-only" >> "$GITHUB_OUTPUT"
+            else
+              echo "value=full" >> "$GITHUB_OUTPUT"
+            fi
+            ;;
+          *)
+            echo "::warning::Unknown scan-mode '$REQUESTED', defaulting to auto."
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              echo "value=changed-only" >> "$GITHUB_OUTPUT"
+            else
+              echo "value=full" >> "$GITHUB_OUTPUT"
+            fi
+            ;;
+        esac
 
     - name: Fetch previous audit body (for trend arrows)
       if: github.event_name != 'pull_request'
@@ -117,15 +131,16 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
-        # Most recent seo-audit issue in any state (closed by next run, but could still be open).
-        prev_body="$(gh issue list --label seo-audit --state all --limit 1 --json body --jq '.[0].body // ""' || echo '')"
+        # Most recent site-scrub issue in any state (closed by next run, but could still be open).
+        prev_body="$(gh issue list --label site-scrub --state all --limit 1 --json body --jq '.[0].body // ""' || echo '')"
+        delimiter="SITESCRUB_$(openssl rand -hex 8)"
         {
-          echo 'body<<SEOPREV_EOF'
+          echo "body<<${delimiter}"
           printf '%s\n' "$prev_body"
-          echo 'SEOPREV_EOF'
+          echo "${delimiter}"
         } >> "$GITHUB_OUTPUT"
 
-    - name: Run SEO review
+    - name: Run SITE Scrub
       shell: bash
       env:
         AI_PROVIDER: ${{ inputs.provider }}
@@ -142,16 +157,16 @@ runs:
         SEO_CONFIG: ${{ inputs.config-file }}
         BROAD_CHANGE_PATTERN: ${{ inputs.broad-change-pattern }}
         MAX_PAGES: ${{ inputs.max-pages }}
-        OUTPUT_FILE: .tmp/seo-review.md
+        OUTPUT_FILE: .tmp/site-scrub.md
         PREVIOUS_AUDIT_BODY: ${{ steps.prev.outputs.body }}
-      run: node "$GITHUB_ACTION_PATH/seo-review.mjs"
+      run: node "$GITHUB_ACTION_PATH/site-scrub.mjs"
 
     - name: Post or update PR comment
       if: github.event_name == 'pull_request'
       uses: marocchino/sticky-pull-request-comment@v3
       with:
-        header: seo-review-bot
-        path: .tmp/seo-review.md
+        header: site-scrub-bot
+        path: .tmp/site-scrub.md
         GITHUB_TOKEN: ${{ inputs.github-token }}
 
     - name: Open audit issue
@@ -162,15 +177,15 @@ runs:
       run: |
         set -euo pipefail
         DATE="$(date -u +%Y-%m-%d)"
-        TITLE="SEO Audit — ${DATE}"
-        BODY_FILE=".tmp/seo-review.md"
+        TITLE="Site Scrub — ${DATE}"
+        BODY_FILE=".tmp/site-scrub.md"
         # Ensure label exists (idempotent).
-        gh label create seo-audit --color BFD4F2 --description "Weekly SEO audit reports" 2>/dev/null || true
+        gh label create site-scrub --color BFD4F2 --description "Weekly Site Scrub audit reports" 2>/dev/null || true
         # Close any older open audit issues to keep the list tidy.
-        gh issue list --label seo-audit --state open --json number,title \
+        gh issue list --label site-scrub --state open --json number,title \
           --jq '.[] | select(.title != "'"$TITLE"'") | .number' \
-          | xargs -I{} gh issue close {} --comment "Superseded by ${TITLE}." || true
+          | xargs -r -I{} gh issue close {} --comment "Superseded by ${TITLE}." || true
         gh issue create \
           --title "$TITLE" \
-          --label seo-audit \
+          --label site-scrub \
           --body-file "$BODY_FILE"
