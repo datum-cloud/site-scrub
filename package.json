@@ -1,9 +1,5 @@
 {
-  "name": "site-scrub",
-  "version": "1.0.0",
-  "private": true,
   "type": "module",
-  "description": "AI-assisted SEO & meta review composite action for static sites",
   "dependencies": {
     "cheerio": "^1.2.0"
   }

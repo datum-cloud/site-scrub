@@ -1,23 +1,31 @@
 # Site Scrub
 
-AI-assisted SEO & meta review for static sites, packaged as a GitHub composite action.
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub-Marketplace-blue?logo=github)](https://github.com/marketplace/actions/site-scrub)
+[![License: CC0-1.0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg)](LICENSE)
 
-It scans your **built HTML output** with Cheerio (titles, descriptions, canonicals, H1s, robots, Open Graph/Twitter tags, JSON-LD, image alt text), computes a deterministic score table, and sends a compact report to an AI model (Claude, GPT, or Gemini) for an actionable review. Then it:
+AI-powered SEO audit for static sites — scans your built HTML and delivers actionable feedback via Claude, GPT, or Gemini.
 
-- **On `pull_request`** — reviews only the pages affected by the PR and posts a sticky comment.
-- **On `schedule` / `workflow_dispatch`** — runs a full-site audit (including broken internal links and redirect-chain checks), opens a labelled issue, and shows trend arrows vs. the previous audit.
+- **On pull requests** — reviews only the changed pages, posts a sticky PR comment
+- **On schedule / manual run** — full-site audit with broken-link checks and trend arrows (▲/▼/▬), filed as a labelled issue
 
-## Requirements
+Checks titles, descriptions, canonicals, H1s, `robots` directives, Open Graph & Twitter tags, JSON-LD, image alt text, and internal links.
 
-- The job must run `actions/checkout` and **build the site** before calling this action (it audits files on disk, not a live URL — SSR-only sites without prerendered HTML are not supported).
-- Node.js available on the runner (`actions/setup-node` or the runner default).
-- An API key secret for one of the supported AI providers (Anthropic, OpenAI, or Google Gemini).
-- Permissions: `contents: read`, `pull-requests: write`, `issues: write`.
-
-## Usage
+## Quick start
 
 ```yaml
-name: SEO Review
+- name: Site Scrub
+  uses: datum-cloud/site-scrub@v1
+  with:
+    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    site-url: https://www.example.com
+```
+
+Add this step **after** your build step. That's it.
+
+## Full workflow example
+
+```yaml
+name: Site Scrub
 
 on:
   pull_request:
@@ -32,7 +40,7 @@ on:
         options: [changed-only, full]
 
 concurrency:
-  group: seo-review-${{ github.ref }}-${{ github.event_name }}
+  group: site-scrub-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -41,13 +49,13 @@ permissions:
   issues: write
 
 jobs:
-  seo-review:
+  site-scrub:
     if: github.event_name != 'pull_request' || github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: 'npm'
@@ -59,7 +67,7 @@ jobs:
           NODE_ENV: production
         run: npm run build
 
-      - name: SEO review
+      - name: Site Scrub
         uses: datum-cloud/site-scrub@v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -70,7 +78,7 @@ jobs:
 
 ## AI providers
 
-The action defaults to Anthropic (Claude). Switch providers with `provider` + `api-key`:
+Defaults to Anthropic (Claude). Switch with `provider` + `api-key`:
 
 ```yaml
 # OpenAI
@@ -83,7 +91,7 @@ with:
   provider: gemini
   api-key: ${{ secrets.GEMINI_API_KEY }}
 
-# Any OpenAI-compatible gateway (OpenRouter, Groq, …)
+# OpenAI-compatible gateway (OpenRouter, Groq, …)
 with:
   provider: openai
   api-key: ${{ secrets.OPENROUTER_API_KEY }}
@@ -91,30 +99,36 @@ with:
   model: anthropic/claude-sonnet-4.6
 ```
 
-Default models per provider: `claude-sonnet-4-6` (anthropic), `gpt-5-mini` (openai), `gemini-2.5-flash` (gemini). Override with `model`.
-
-The legacy `anthropic-api-key` input still works and implies `provider: anthropic`.
+Default models: `claude-sonnet-4-6` · `gpt-4o-mini` · `gemini-2.5-flash`. Override with `model`.
 
 ## Inputs
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `api-key` | ✅ | — | API key for the selected provider. |
+| `site-url` | ✅ | — | Production origin (e.g. `https://www.example.com`). Used to recognise internal links. |
 | `provider` | | `anthropic` | AI provider: `anthropic`, `openai`, or `gemini`. |
-| `base-url` | | per provider | API base URL override (e.g. an OpenAI-compatible gateway with `provider: openai`). |
-| `anthropic-api-key` | | — | Deprecated alias of `api-key` (Anthropic only). |
-| `site-url` | ✅ | — | Production origin (e.g. `https://www.example.com`). Used to recognise internal links and render absolute links in the report. |
-| `dist-dir` | | `dist` | Directory containing built HTML (Astro: `dist/client` when using an adapter). |
-| `pages-dir` | | `src/pages` | Source dir whose files map to routes; used for changed-file detection and broken-link validation. |
-| `content-dir` | | `src/content` | Content-collection dir mapped to routes; used for changed-file detection. |
+| `dist-dir` | | `dist` | Directory containing built HTML. Astro adapter builds: use `dist/client`. |
 | `scan-mode` | | `auto` | `auto` (changed-only on PRs, full otherwise), `changed-only`, or `full`. |
-| `config-file` | | — | Path to a JSON config with `excludePaths`, `excludeFiles`, `excludeFilePatterns` (regex strings). |
-| `broad-change-pattern` | | Astro-oriented | Regex; a changed file matching it makes the PR scan skip as a "broad change" (layout/config edits would invalidate a per-page diff). |
-| `model` | | pinned in action | Model id override for the selected provider. |
-| `max-pages` | | `0` (unlimited) | Cap on pages analyzed. |
-| `github-token` | | `github.token` | Token for the PR comment and audit issue. |
+| `pages-dir` | | `src/pages` | Source dir whose files map to routes; used for changed-file detection. |
+| `content-dir` | | `src/content` | Content-collection dir mapped to routes; used for changed-file detection. |
+| `config-file` | | — | Path to a JSON config with `excludePaths`, `excludeFiles`, `excludeFilePatterns`. |
+| `max-pages` | | `0` (unlimited) | Cap on pages analyzed per run. |
+| `model` | | pinned per provider | Model ID override. |
+| `base-url` | | — | API base URL override for OpenAI-compatible gateways. |
+| `github-token` | | `github.token` | Token for posting PR comments and opening audit issues. |
+| `broad-change-pattern` | | Astro-oriented | Regex; matching changed files skip the PR scan (layout/config edits affect all pages). |
+| `anthropic-api-key` | | — | Deprecated alias of `api-key` (Anthropic only). |
 
-## Exclusion config example
+## Scan modes
+
+- **`changed-only`** (PR default) — reviews only pages whose source files changed. PRs touching shared layouts or config skip the scan entirely with an explanatory comment, since a per-page diff would be misleading.
+- **`full`** (schedule/dispatch default) — reviews every built page plus broken internal links and redirect chains. Results are filed as an issue labelled `site-scrub`; the previous issue is closed and its score block is used to compute trend arrows.
+- **`auto`** — selects `changed-only` on `pull_request`, `full` on everything else.
+
+## Exclusion config
+
+Create a JSON file and pass its path via `config-file`:
 
 ```json
 {
@@ -124,9 +138,17 @@ The legacy `anthropic-api-key` input still works and implies `provider: anthropi
 }
 ```
 
-Pass its path via `config-file: seo-review.config.json`.
+```yaml
+- uses: datum-cloud/site-scrub@v1
+  with:
+    api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+    site-url: https://www.example.com
+    config-file: site-scrub.config.json
+```
 
-## How scan modes work
+## Requirements
 
-- **changed-only** (PR default): only pages whose `pages-dir`/`content-dir` sources changed are reviewed. PRs touching shared layouts/config (per `broad-change-pattern`) skip the scan with an explanatory comment, since a per-page diff would be misleading. No link audits — kept off the PR hot path.
-- **full** (schedule/dispatch default): every built page is reviewed, plus broken-internal-link and redirect-chain audits. The result is filed as an issue labelled `seo-audit`; the previous issue is closed and its embedded score block is used to render trend arrows (▲/▼/▬).
+- The job must checkout the repo and **build the site** before calling this action (audits files on disk, not a live URL).
+- Node.js on the runner (`actions/setup-node` or the runner default).
+- An API key for one of the supported providers.
+- Permissions: `contents: read`, `pull-requests: write`, `issues: write`.
