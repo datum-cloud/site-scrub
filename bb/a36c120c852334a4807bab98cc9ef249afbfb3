@@ -1,0 +1,23 @@
+action.yml
+  s_2ecd400cf0c446::t_82c78a021b73d9 166
+  s_2ecd400cf0c446::t_1716dcac91a9c7 144
+site-scrub.mjs
+  s_2ecd400cf0c446::t_7bad514e05913b 973-976
+  s_2ecd400cf0c446::t_10414ed41e5dc1 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "bba36c120c852334a4807bab98cc9ef249afbfb3",
+  "prompts": {},
+  "sessions": {
+    "s_2ecd400cf0c446": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "37fe160c-6cfa-4538-a8d5-710c473ae679",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "AriaEdo <aria.edo@gmail.com>"
+    }
+  }
+}
