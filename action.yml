@@ -141,6 +141,7 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
     - name: Run SITE Scrub
+      id: site-scrub
       shell: bash
       env:
         AI_PROVIDER: ${{ inputs.provider }}
@@ -162,7 +163,7 @@ runs:
       run: node "$GITHUB_ACTION_PATH/site-scrub.mjs"
 
     - name: Post or update PR comment
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && steps.site-scrub.outputs.mode != 'skipped-no-changes'
       uses: marocchino/sticky-pull-request-comment@v3
       with:
         header: site-scrub-bot
