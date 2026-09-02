@@ -122,7 +122,7 @@ Default models: `claude-sonnet-4-6` · `gpt-4o-mini` · `gemini-2.5-flash`. Over
 
 ## Scan modes
 
-- **`changed-only`** (PR default) — reviews only pages whose source files changed. PRs with no matching page changes, or that touch shared layouts/config, skip the scan entirely — no PR comment is posted, since a per-page diff would be misleading or there's nothing to review.
+- **`changed-only`** (PR default) — reviews only pages whose source files changed. If no changed files are provided, the scan is skipped silently with no PR comment. PRs that touch shared layouts/config, or have no matching page changes, also skip the full-site review, but post a PR comment explaining why, since a per-page diff would be misleading or there's nothing to review.
 - **`full`** (schedule/dispatch default) — reviews every built page plus broken internal links and redirect chains. Results are filed as an issue labelled `site-scrub`; the previous issue is closed and its score block is used to compute trend arrows.
 - **`auto`** — selects `changed-only` on `pull_request`, `full` on everything else.
 
