@@ -10,6 +10,6 @@ permissions:
 
 jobs:
   ci:
-    uses: datum-cloud/actions/.github/workflows/ci-basic.yaml@c4bc6bcfe15b08d87cb02202f4071616d9106e72
+    uses: datum-cloud/actions/.github/workflows/ci-basic.yaml@v1.26.0
     with:
       run: node --check site-scrub.mjs
